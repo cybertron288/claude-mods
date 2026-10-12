@@ -1,0 +1,1 @@
+{ "name": "yt-music", "version": "0.1.0", "description": "YT Music in Chrome above the prompt: the track, its time, and play/pause, previous, next and seek controls", "types": "./types/index.d.ts" }

@@ -1,0 +1,7 @@
+{
+  "name": "ravi-mods",
+  "owner": { "name": "Ravi" },
+  "plugins": [
+    { "name": "yt-music", "source": "./yt-music", "description": "YT Music in Chrome under the prompt with playback controls" }
+  ]
+}
