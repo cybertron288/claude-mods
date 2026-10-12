@@ -59,11 +59,15 @@ const clock = (seconds: number): string => {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }
 
-const bar = (seconds: number, duration: number, width = 16): string => {
-  const filled = duration > 0 ? Math.round((seconds / duration) * width) : 0
+// Gruvbox, to match the skin.
+const COLORS = { note: '#fb4934', title: '#fabd2f', played: '#b8bb26', muted: '#928374' }
 
-  return '━'.repeat(Math.min(width, filled)) + '─'.repeat(Math.max(0, width - filled))
-}
+const filledOf = (seconds: number, duration: number, width: number): number =>
+  duration > 0 ? Math.min(width, Math.round((seconds / duration) * width)) : 0
+
+const played = (seconds: number, duration: number, width = 16): string => '━'.repeat(filledOf(seconds, duration, width))
+
+const left = (seconds: number, duration: number, width = 16): string => '─'.repeat(width - filledOf(seconds, duration, width))
 
 async function runInTab($: EngineInterface, js: string): Promise<string | null> {
   // Asking Chrome while it is closed would launch it.
@@ -134,13 +138,15 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {theirs}
         <Box>
-          <Text color="red">♪ </Text>
-          <Text bold>{track.title}</Text>
-          <Text dimColor>{` - ${track.artist}  `}</Text>
+          <Text color={COLORS.note}>♪ </Text>
+          <Text bold color={COLORS.title}>{track.title}</Text>
+          <Text color={COLORS.muted}>{` - ${track.artist}  `}</Text>
           {CONTROLS.map(([action, label]) => (
             <Button plain key={action} label={` ${action === 'toggle' && !track.isPaused ? '‖' : label} `} onPress={() => press($, action)} />
           ))}
-          <Text dimColor>{`  ${clock(track.seconds)} ${bar(track.seconds, track.duration)} ${clock(track.duration)}`}</Text>
+          <Text color={COLORS.muted}>{`  ${clock(track.seconds)} `}</Text>
+          <Text color={COLORS.played}>{played(track.seconds, track.duration)}</Text>
+          <Text color={COLORS.muted}>{`${left(track.seconds, track.duration)} ${clock(track.duration)}`}</Text>
         </Box>
       </Box>
     )

@@ -1,0 +1,1 @@
+{ "name": "session-info", "version": "0.1.0", "description": "Usage meters, model, effort, context window and git branch in one line under the prompt", "types": "./types/index.d.ts" }
