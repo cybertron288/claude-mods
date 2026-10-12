@@ -29,6 +29,15 @@ const meterColor = (percent: number): string => (percent >= 95 ? COLORS.err : pe
 // The last effort a model request carried; none before the first.
 let effort: string | null = null
 
+// The effort `/effort` set, as the /config menu holds it: for the first turn, before any
+// model request has said which effort it ran at.
+async function configuredEffort($: EngineInterface): Promise<string | null> {
+  const rows = await $.config.list().catch(() => [])
+  const row = rows.find(r => /effort/i.test(r.key) || /effort/i.test(r.label))
+
+  return row === undefined || row.value === null || row.value === undefined || row.value === '' ? null : String(row.value)
+}
+
 async function refresh($: EngineInterface): Promise<void> {
   const [model, usage, git] = await Promise.all([
     $.session.model(),
@@ -36,11 +45,13 @@ async function refresh($: EngineInterface): Promise<void> {
     $.process.run(['git', 'branch', '--show-current']).catch(() => null),
   ])
   const branch = git !== null && git.exitCode === 0 ? git.stdout.trim() || null : null
+  const status = branch === null ? null : await $.process.run(['git', 'status', '--porcelain']).catch(() => null)
+  const dirty = status !== null && status.exitCode === 0 && status.stdout.trim() !== ''
   const meters: Meter[] = [
     ...(usage.context.percent == null ? [] : [{ label: 'ctx', percent: usage.context.percent }]),
     ...usage.rateLimits.map(limit => ({ label: limitLabel(limit.kind), percent: limit.percentUsed })),
   ].map(meter => ({ ...meter, percent: Math.max(0, Math.min(100, Math.round(meter.percent))) }))
-  const next: Info = { model, effort: effort ?? (await $.env.get('CLAUDE_EFFORT')) ?? null, window: usage.context.window || null, branch, meters }
+  const next: Info = { model, effort: effort ?? (await configuredEffort($)), window: usage.context.window || null, branch, dirty, meters }
   const prev = await read($, infoAtom)
 
   if (JSON.stringify(prev) !== JSON.stringify(next)) {
@@ -90,7 +101,7 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const parts = [
       { text: info.model, color: COLORS.model },
-      info.effort === null ? null : { text: `effort ${info.effort}`, color: COLORS.effort },
+      info.effort === null ? null : { text: info.effort, color: COLORS.effort },
       info.window === null ? null : { text: `${windowLabel(info.window)} ctx`, color: COLORS.window },
     ].filter((part): part is { text: string; color: string } => part !== null)
 
@@ -113,7 +124,12 @@ export const register: Register = on => {
               </Text>
             ))}
           </Box>
-          {info.branch === null ? null : <Text color={COLORS.branch}>{`⎇ ${info.branch}`}</Text>}
+          {info.branch === null ? null : (
+            <Text>
+              <Text color={COLORS.branch}>{`⎇ ${info.branch}`}</Text>
+              {info.dirty ? <Text color={COLORS.warn}>{'*'}</Text> : null}
+            </Text>
+          )}
         </Box>
       </Box>
     )
