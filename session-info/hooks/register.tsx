@@ -15,16 +15,21 @@ const limitLabel = (kind: string): string => {
   return name.includes('five') ? '5h' : name.includes('seven') || name.includes('week') ? '7d' : name.replace(/_/g, ' ')
 }
 
-const bar = (percent: number, width = 8): string => {
+// Centred thick bars (▬); the empty track is the same glyph drawn muted so the fill stands out.
+const bar = (percent: number, width = 8): { filled: string; empty: string } => {
   const filled = Math.round((percent / 100) * width)
 
-  return '━'.repeat(filled) + '─'.repeat(width - filled)
+  return { filled: '▬'.repeat(filled), empty: '▬'.repeat(width - filled) }
 }
 
 // Gruvbox, to match the skin.
 const COLORS = { accent: '#fabd2f', warn: '#fe8019', err: '#fb4934', model: '#8ec07c', effort: '#d3869b', window: '#83a598', branch: '#b8bb26', muted: '#928374' }
 
-const meterColor = (percent: number): string => (percent >= 95 ? COLORS.err : percent >= 80 ? COLORS.warn : COLORS.accent)
+// Each meter keeps its own hue until it runs high; then warn and err take over.
+const METER_COLORS: Record<string, string> = { ctx: '#4bb6e5', '5h': '#cc57de', '7d': '#35cd7b' }
+
+const meterColor = (label: string, percent: number): string =>
+  percent >= 95 ? COLORS.err : percent >= 80 ? COLORS.warn : (METER_COLORS[label] ?? COLORS.accent)
 
 // The last effort a model request carried; none before the first.
 let effort: string | null = null
@@ -51,8 +56,10 @@ async function refresh($: EngineInterface): Promise<void> {
     ...(usage.context.percent == null ? [] : [{ label: 'ctx', percent: usage.context.percent }]),
     ...usage.rateLimits.map(limit => ({ label: limitLabel(limit.kind), percent: limit.percentUsed })),
   ].map(meter => ({ ...meter, percent: Math.max(0, Math.min(100, Math.round(meter.percent))) }))
-  const next: Info = { model, effort: effort ?? (await configuredEffort($)), window: usage.context.window || null, branch, dirty, meters }
   const prev = await read($, infoAtom)
+  // A reload resets the module's `effort`; the last one shown lives on in session state.
+  const shownEffort = effort ?? (await configuredEffort($)) ?? prev?.effort ?? null
+  const next: Info = { model, effort: shownEffort, window: usage.context.window || null, branch, dirty, meters }
 
   if (JSON.stringify(prev) !== JSON.stringify(next)) {
     await update($, infoAtom, () => next)
@@ -113,7 +120,8 @@ export const register: Register = on => {
             {info.meters.map(meter => (
               <Text key={meter.label}>
                 <Text color={COLORS.muted}>{`${meter.label} `}</Text>
-                <Text color={meterColor(meter.percent)}>{bar(meter.percent)}</Text>
+                <Text color={meterColor(meter.label, meter.percent)}>{bar(meter.percent).filled}</Text>
+                <Text color={COLORS.muted}>{bar(meter.percent).empty}</Text>
                 <Text color={COLORS.muted}>{` ${meter.percent}%  `}</Text>
               </Text>
             ))}
