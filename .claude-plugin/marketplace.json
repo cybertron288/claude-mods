@@ -3,6 +3,7 @@
   "owner": { "name": "Ravi" },
   "plugins": [
     {"name": "yt-music", "source": "./yt-music", "description": "YT Music in Chrome under the prompt with playback controls"},
-    {"name": "session-info", "source": "./session-info", "description": "Usage meters, model, effort, context window and git branch in one line under the prompt"}
+    {"name": "session-info", "source": "./session-info", "description": "Usage meters, model, effort, context window and git branch in one line under the prompt"},
+    {"name": "cc-model-router", "source": "./cc-model-router", "description": "Routes each prompt to Haiku, Sonnet or Opus by how hard it is"}
   ]
 }
