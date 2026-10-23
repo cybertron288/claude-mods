@@ -19,6 +19,11 @@ const BUILT_INS = new Set([
   'reload-plugins', 'resume', 'rewind', 'router', 'status', 'terminal-setup', 'theme', 'usage', 'vim',
 ])
 
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
+
+// Bash that changes files or history; `2>&1` and `>/dev/null` are not writes.
+const WRITING_BASH = /(^|[;&|]\s*)(rm|mv|cp|mkdir|touch|tee|sed -i|git (commit|push|checkout|reset|rebase|merge))\b|>>?\s*(?!&|\/dev\/null)[^\s&|;]/
+
 type Verdict = { tier: Tier; source: DecisionSource; reason: string }
 
 // Only what the owner typed, at an idle prompt, is ranked; everything else rides the sticky tier.
@@ -61,7 +66,49 @@ async function decide($: EngineInterface, verdict: Verdict, text: string): Promi
   $.ui.status(`router: ${route.model}`)
 }
 
+function describe(state: RouterState): string {
+  const { decision } = state
+  const last = decision === null ? 'no decision yet' : `last: ${decision.model} (${decision.source}: ${decision.reason})`
+
+  return `Router ${state.isOn ? 'on' : 'off'} · sticky tier: ${state.stickyTier ?? 'none'} · ${last}`
+}
+
 export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'router', description: 'Turn the model router on or off, or show its state' })
+
+    return next(e)
+  })
+
+  on('command.run', { command: 'router' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+
+    if (arg === 'on' || arg === 'off') {
+      await update($, router, state => ({ ...state, isOn: arg === 'on' }))
+      $.ui.status(arg === 'on' ? undefined : 'router: off')
+    } else if (arg !== '' && arg !== 'status') {
+      return { text: 'Usage: /router on | off | status' }
+    }
+
+    return { text: describe(await read($, router)) }
+  })
+
+  // Haiku answers; it does not edit. An edit on a Haiku turn is refused and the turn moves up to Sonnet, which retries it.
+  on('tool.call', async ($, e, next) => {
+    const state = await read($, router)
+    const tool = String(e.tool)
+    const isEdit = EDIT_TOOLS.has(tool) || (e.tool === 'Bash' && WRITING_BASH.test(e.command))
+
+    if (e.agentId !== undefined || !state.isOn || state.decision === null || !isEdit || !/haiku/i.test(state.decision.model)) {
+      return next(e)
+    }
+
+    const verdict: Verdict = { tier: 'medium', source: 'escalated', reason: `haiku tried ${tool}` }
+    await decide($, verdict, tool === 'Bash' && e.tool === 'Bash' ? e.command : tool)
+
+    return { deny: 'Routed up to Sonnet for edits; retry this call.' }
+  }).catch(($, e, next) => next(e))
+
   on('prompt.submit', async ($, e, next) => {
     const state = await read($, router)
 
