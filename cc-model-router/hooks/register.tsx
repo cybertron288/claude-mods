@@ -26,6 +26,17 @@ const WRITING_BASH = /(^|[;&|]\s*)(rm|mv|cp|mkdir|touch|tee|sed -i|git (commit|p
 
 type Verdict = { tier: Tier; source: DecisionSource; reason: string }
 
+// The model the main loop's latest step was sent on: every tool call of a Haiku step is judged by it,
+// not by the decision, which the first denied edit already moved to Sonnet.
+let stepModel: string | null = null
+
+// Only a Haiku pick needs the size; the local estimate counts tool results the last response has not seen.
+async function contextTokens($: EngineInterface): Promise<number | undefined> {
+  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => undefined)
+
+  return usage?.context.breakdown?.totalTokens ?? usage?.context.tokens
+}
+
 // Only what the owner typed, at an idle prompt, is ranked; everything else rides the sticky tier.
 const isRankable = (e: PromptSubmitInput): boolean =>
   e.isMeta !== true &&
@@ -58,7 +69,8 @@ async function judge($: EngineInterface, text: string, sticky: Tier | null, comm
 }
 
 async function decide($: EngineInterface, verdict: Verdict, text: string): Promise<void> {
-  const route = routeFor({ tier: verdict.tier, sessionModel: await $.session.model() })
+  const tokens = verdict.tier === 'simple' ? await contextTokens($) : undefined
+  const route = routeFor({ tier: verdict.tier, sessionModel: await $.session.model(), contextTokens: tokens })
   const decision: Decision = { ...verdict, tier: route.tier, model: route.model, effort: route.effort, at: await $.clock.now() }
 
   await update($, router, state => ({ ...state, stickyTier: route.tier, decision }))
@@ -99,7 +111,7 @@ export const register: Register = on => {
     const tool = String(e.tool)
     const isEdit = EDIT_TOOLS.has(tool) || (e.tool === 'Bash' && WRITING_BASH.test(e.command))
 
-    if (e.agentId !== undefined || !state.isOn || state.decision === null || !isEdit || !/haiku/i.test(state.decision.model)) {
+    if (e.agentId !== undefined || !state.isOn || !isEdit || stepModel === null || !/haiku/i.test(stepModel)) {
       return next(e)
     }
 
@@ -138,12 +150,18 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     const state = await read($, router)
 
-    if (e.agentId !== undefined || !state.isOn || state.decision === null) {
+    if (e.agentId !== undefined) {
       return yield* next(e)
     }
 
-    const usage = await $.session.usage().catch(() => undefined)
-    const route = routeFor({ tier: state.decision.tier, sessionModel: e.model, sessionEffort: e.effort, contextTokens: usage?.context.tokens })
+    if (!state.isOn || state.decision === null) {
+      stepModel = e.model
+
+      return yield* next(e)
+    }
+
+    const tokens = state.decision.tier === 'simple' ? await contextTokens($) : undefined
+    const route = routeFor({ tier: state.decision.tier, sessionModel: e.model, sessionEffort: e.effort, contextTokens: tokens })
 
     if (route.model !== state.decision.model || route.effort !== state.decision.effort || route.tier !== state.decision.tier) {
       await update($, router, current =>
@@ -151,6 +169,8 @@ export const register: Register = on => {
       )
       $.ui.status(`router: ${route.model}`)
     }
+
+    stepModel = route.model
 
     return yield* next({ ...e, model: route.model, effort: route.effort ?? e.effort })
   })

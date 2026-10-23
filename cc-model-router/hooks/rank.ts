@@ -74,11 +74,16 @@ export function decideAgainstSticky(text: string, sticky: Tier | null, verdict: 
     return verdict === undefined ? { kind: 'ask' } : { kind: 'switch', verdict }
   }
 
-  if (isFollowUp(text) || verdict === undefined || verdict.tier === sticky) {
+  if (verdict === undefined || verdict.tier === sticky) {
     return { kind: 'keep' }
   }
 
-  if (verdict.tier === 'hard' || text.trim().length >= NEW_TASK_LENGTH) {
+  // A hard signal always moves up, even behind "ok"; a follow-up only blocks moving down or sideways.
+  if (verdict.tier === 'hard') {
+    return { kind: 'switch', verdict }
+  }
+
+  if (!isFollowUp(text) && text.trim().length >= NEW_TASK_LENGTH) {
     return { kind: 'switch', verdict }
   }
 

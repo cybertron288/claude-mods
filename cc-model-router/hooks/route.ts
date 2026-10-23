@@ -18,7 +18,8 @@ const opusEffort = (session: Effort | number | undefined): Effort =>
   typeof session === 'string' && EFFORT_ORDER.indexOf(session) > EFFORT_ORDER.indexOf('high') ? session : 'high'
 
 export function routeFor({ tier, sessionModel, sessionEffort, contextTokens }: RouteInput): Route {
-  const fits = tier !== 'simple' || (contextTokens ?? 0) <= HAIKU_CONTEXT_LIMIT
+  // An unknown context size is treated as too big for Haiku.
+  const fits = tier !== 'simple' || (contextTokens !== undefined && contextTokens <= HAIKU_CONTEXT_LIMIT)
   const routed: Tier = fits ? tier : 'medium'
   const isLong = /\[1m\]/i.test(sessionModel) && routed !== 'simple'
 
