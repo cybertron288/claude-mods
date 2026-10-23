@@ -170,6 +170,11 @@ export const register: Register = on => {
       $.ui.status(`router: ${route.model}`)
     }
 
+    // One log line whenever the model a step runs on differs from the step before it.
+    if (stepModel !== route.model) {
+      await logDecision($, { ...state.decision, ...route, source: 'step', reason: `step ${e.index} of ${e.turnId}: ${stepModel ?? 'none'} -> ${route.model}`, text: '' })
+    }
+
     stepModel = route.model
 
     return yield* next({ ...e, model: route.model, effort: route.effort ?? e.effort })

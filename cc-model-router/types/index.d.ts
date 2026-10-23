@@ -2,7 +2,7 @@ export type Tier = 'simple' | 'medium' | 'hard'
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-export type DecisionSource = 'prefix' | 'rule' | 'classifier' | 'sticky' | 'escalated'
+export type DecisionSource = 'prefix' | 'rule' | 'classifier' | 'sticky' | 'escalated' | 'step'
 
 export type Decision = { tier: Tier; model: string; effort?: Effort; source: DecisionSource; reason: string; at: number }
 
