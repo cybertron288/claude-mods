@@ -43,9 +43,21 @@ async function configuredEffort($: EngineInterface): Promise<string | null> {
   return row === undefined || row.value === null || row.value === undefined || row.value === '' ? null : String(row.value)
 }
 
+type Routed = { model: string; effort: string | null }
+
+// cc-model-router's current pick, when that mod is loaded and on. Read untyped so session-info loads without it.
+async function routed($: EngineInterface): Promise<Routed | null> {
+  const read = await $.state.get({ plugin: 'cc-model-router', key: 'router' } as never).catch(() => null)
+  const state = read?.value as { isOn?: unknown; decision?: { model?: unknown; effort?: unknown } | null } | undefined
+  const model = state?.isOn === true ? state.decision?.model : undefined
+
+  return typeof model === 'string' ? { model, effort: typeof state?.decision?.effort === 'string' ? state.decision.effort : null } : null
+}
+
 async function refresh($: EngineInterface): Promise<void> {
-  const [model, usage, git] = await Promise.all([
+  const [sessionModel, router, usage, git] = await Promise.all([
     $.session.model(),
+    routed($),
     $.session.usage(),
     $.process.run(['git', 'branch', '--show-current']).catch(() => null),
   ])
@@ -58,8 +70,8 @@ async function refresh($: EngineInterface): Promise<void> {
   ].map(meter => ({ ...meter, percent: Math.max(0, Math.min(100, Math.round(meter.percent))) }))
   const prev = await read($, infoAtom)
   // A reload resets the module's `effort`; the last one shown lives on in session state.
-  const shownEffort = effort ?? (await configuredEffort($)) ?? prev?.effort ?? null
-  const next: Info = { model, effort: shownEffort, window: usage.context.window || null, branch, dirty, meters }
+  const shownEffort = router?.effort ?? effort ?? (await configuredEffort($)) ?? prev?.effort ?? null
+  const next: Info = { model: router?.model ?? sessionModel, effort: shownEffort, window: usage.context.window || null, branch, dirty, meters }
 
   if (JSON.stringify(prev) !== JSON.stringify(next)) {
     await update($, infoAtom, () => next)
@@ -80,6 +92,17 @@ export const register: Register = on => {
     }
 
     return yield* next(e)
+  })
+
+  // The router picks a model as the prompt is submitted; show it as the turn begins.
+  on('turn.start', async ($, e, next) => {
+    const result = await next(e)
+
+    if (e.agentId === undefined) {
+      await refresh($)
+    }
+
+    return result
   })
 
   on('turn.complete', async ($, e, next) => {
