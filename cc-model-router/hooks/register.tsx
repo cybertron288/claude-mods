@@ -3,14 +3,12 @@ import type { EngineInterface, PromptSubmitInput, Register } from 'claude-code'
 
 import type { Decision, DecisionSource, RouterState, Tier } from '../types'
 import { logDecision } from './log'
-import { decideAgainstSticky, parsePrefix, rankByRules } from './rank'
+import { decideAgainstSticky, isFollowUp, parsePrefix, rankByRules } from './rank'
 import { routeFor } from './route'
 
 const router = atom({ plugin: 'cc-model-router', key: 'router' } as const, { isOn: true, stickyTier: null, decision: null } as RouterState)
 
 const TIERS: readonly Tier[] = ['simple', 'medium', 'hard']
-
-const CLASSIFIER_TIMEOUT_MS = 8000
 
 // Claude Code's own commands: they keep the sticky model and are never ranked.
 const BUILT_INS = new Set([
@@ -44,34 +42,76 @@ const isRankable = (e: PromptSubmitInput): boolean =>
   (e.origin.kind === 'composer' || e.origin.kind === 'bridge') &&
   (e.command === undefined || !BUILT_INS.has(e.command.name))
 
-async function classify($: EngineInterface, text: string): Promise<Tier> {
-  const timeout = $.clock.sleep(CLASSIFIER_TIMEOUT_MS).then(() => {
-    throw new Error('classifier timed out')
-  })
-  const label = await Promise.race([$.model.classify(text, TIERS, { model: 'haiku' }), timeout])
+// What Haiku reads before each prompt: the owner's hard categories and what a follow-up looks like.
+const CLASSIFIER_SYSTEM = [
+  'You route a coding assistant prompt to a model. Answer with exactly one word.',
+  'hard: planning, brainstorming, design or architecture; debugging, failing tests, crashes, root causes; changes across many files; long pasted logs, docs or code.',
+  'medium: ordinary code changes in one or two files, moderate how-to questions.',
+  'simple: short factual questions, lookups, explanations, chat.',
+  'keep: the prompt continues the current task (feedback, a reply to a question, a small tweak) and should stay on the current level.',
+  'Words: simple, medium, hard, keep.',
+].join('\n')
 
-  return TIERS.find(tier => tier === label) ?? 'medium'
+const CLASSIFIER_TIMEOUT_MS = 3000
+
+const TIER_ORDER: Record<Tier, number> = { simple: 0, medium: 1, hard: 2 }
+
+const higher = (a: Tier, b: Tier): Tier => (TIER_ORDER[a] >= TIER_ORDER[b] ? a : b)
+
+// Haiku's own read of the prompt; undefined when it fails, times out or names no level.
+async function classify($: EngineInterface, text: string, sticky: Tier | null): Promise<Tier | 'keep' | undefined> {
+  const current = sticky === null ? 'Current level: none (first prompt, never answer keep).' : `Current level: ${sticky}.`
+  const result = await $.model
+    .complete({ model: 'haiku', system: CLASSIFIER_SYSTEM, prompt: `${current}\n\nPrompt:\n${text.slice(0, 4000)}`, maxTokens: 5, effort: 'low', timeoutMs: CLASSIFIER_TIMEOUT_MS })
+    .catch(() => undefined)
+  const word = result?.isAnswered ? result.text.trim().toLowerCase().match(/simple|medium|hard|keep/)?.[0] : undefined
+
+  return word === 'keep' ? (sticky === null ? undefined : 'keep') : TIERS.find(tier => tier === word)
 }
 
+// Instant answers first (a hard rule, a follow-up); otherwise Haiku and the rules both rank it and the higher wins.
 async function judge($: EngineInterface, text: string, sticky: Tier | null, command?: { command: string; args: string }): Promise<Verdict> {
   const verdict = rankByRules(text, command)
+  const rules = verdict === undefined ? 'unsure' : `${verdict.tier}/${verdict.rule}`
+
+  if (verdict?.tier === 'hard') {
+    return { tier: 'hard', source: 'rule', reason: verdict.rule }
+  }
+
+  if (sticky !== null && isFollowUp(text)) {
+    return { tier: sticky, source: 'sticky', reason: 'follow-up' }
+  }
+
+  const haiku = await classify($, text, sticky)
+
+  if (haiku === 'keep' && sticky !== null) {
+    return { tier: sticky, source: 'classifier', reason: `rules: ${rules} · haiku: keep` }
+  }
+
+  if (haiku !== undefined && haiku !== 'keep') {
+    const tier = verdict === undefined ? haiku : higher(haiku, verdict.tier)
+
+    return { tier, source: 'classifier', reason: `rules: ${rules} · haiku: ${haiku} → ${tier}` }
+  }
+
+  // Haiku gave nothing: the rules alone, as before.
   const decision = decideAgainstSticky(text, sticky, verdict)
 
   if (decision.kind === 'switch') {
-    return { tier: decision.verdict.tier, source: 'rule', reason: decision.verdict.rule }
+    return { tier: decision.verdict.tier, source: 'rule', reason: `${decision.verdict.rule} (haiku failed)` }
   }
 
-  if (decision.kind === 'keep' && sticky !== null) {
-    return { tier: sticky, source: 'sticky', reason: verdict === undefined ? 'no clear signal' : `kept over ${verdict.rule}` }
+  if (sticky !== null) {
+    return { tier: sticky, source: 'sticky', reason: `rules: ${rules} (haiku failed)` }
   }
 
-  return { tier: await classify($, text), source: 'classifier', reason: 'rules unsure' }
+  throw new Error('no rule and no classifier answer')
 }
 
 async function decide($: EngineInterface, verdict: Verdict, text: string): Promise<void> {
   const tokens = verdict.tier === 'simple' ? await contextTokens($) : undefined
   const route = routeFor({ tier: verdict.tier, sessionModel: await $.session.model(), contextTokens: tokens })
-  const decision: Decision = { ...verdict, tier: route.tier, model: route.model, effort: route.effort, at: await $.clock.now() }
+  const decision: Decision = { ...verdict, tier: route.tier, model: route.model, effort: route.effort, at: await $.clock.now(), contextTokens: tokens }
 
   await update($, router, state => ({ ...state, stickyTier: route.tier, decision }))
   await logDecision($, { ...decision, text })
