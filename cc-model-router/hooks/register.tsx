@@ -87,6 +87,8 @@ function describe(state: RouterState): string {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'router', description: 'Turn the model router on or off, or show its state' })
+    // Earlier versions set a status entry that outlives a reload; session-info draws the routed model now.
+    $.ui.status(undefined)
 
     return next(e)
   })

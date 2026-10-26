@@ -156,7 +156,7 @@ export const register: Register = on => {
             ))}
           </Box>
           <Box flexDirection="column" alignItems="flex-end">
-            {info.isRouted ? <Text color={COLORS.router}>{`⇢ routed to ${info.model}`}</Text> : null}
+            {info.isRouted ? <Text color={COLORS.router}>{`→ routed to ${info.model}`}</Text> : null}
             {info.branch === null ? null : (
               <Text>
                 <Text color={COLORS.branch}>{`⎇ ${info.branch}`}</Text>
