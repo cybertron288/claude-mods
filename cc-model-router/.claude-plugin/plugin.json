@@ -1,0 +1,1 @@
+{ "name": "cc-model-router", "version": "0.1.0", "description": "Routes each prompt to Haiku, Sonnet or Opus by how hard it is", "types": "./types/index.d.ts" }

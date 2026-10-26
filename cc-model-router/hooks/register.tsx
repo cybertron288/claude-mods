@@ -1,0 +1,229 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, PromptSubmitInput, Register } from 'claude-code'
+
+import type { Decision, DecisionSource, RouterState, Tier } from '../types'
+import { logDecision } from './log'
+import { decideAgainstSticky, isFollowUp, parsePrefix, rankByRules } from './rank'
+import { routeFor } from './route'
+
+const router = atom({ plugin: 'cc-model-router', key: 'router' } as const, { isOn: true, stickyTier: null, decision: null } as RouterState)
+
+const TIERS: readonly Tier[] = ['simple', 'medium', 'hard']
+
+// Claude Code's own commands: they keep the sticky model and are never ranked.
+const BUILT_INS = new Set([
+  'add-dir', 'agents', 'bug', 'clear', 'compact', 'config', 'context', 'cost', 'doctor', 'effort', 'exit', 'export', 'fast',
+  'help', 'hooks', 'ide', 'init', 'login', 'logout', 'mcp', 'memory', 'model', 'permissions', 'plugin', 'release-notes',
+  'reload-plugins', 'resume', 'rewind', 'router', 'status', 'terminal-setup', 'theme', 'usage', 'vim',
+])
+
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
+
+// Bash that changes files or history; `2>&1` and `>/dev/null` are not writes.
+const WRITING_BASH = /(^|[;&|]\s*)(rm|mv|cp|mkdir|touch|tee|sed -i|git (commit|push|checkout|reset|rebase|merge))\b|>>?\s*(?!&|\/dev\/null)[^\s&|;]/
+
+type Verdict = { tier: Tier; source: DecisionSource; reason: string }
+
+// The model the main loop's latest step was sent on: every tool call of a Haiku step is judged by it,
+// not by the decision, which the first denied edit already moved to Sonnet.
+let stepModel: string | null = null
+
+// Only a Haiku pick needs the size; the local estimate counts tool results the last response has not seen.
+async function contextTokens($: EngineInterface): Promise<number | undefined> {
+  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => undefined)
+
+  return usage?.context.breakdown?.totalTokens ?? usage?.context.tokens
+}
+
+// Only what the owner typed, at an idle prompt, is ranked; everything else rides the sticky tier.
+const isRankable = (e: PromptSubmitInput): boolean =>
+  e.isMeta !== true &&
+  e.turnId === undefined &&
+  (e.origin.kind === 'composer' || e.origin.kind === 'bridge') &&
+  (e.command === undefined || !BUILT_INS.has(e.command.name))
+
+// What Haiku reads before each prompt: the owner's hard categories and what a follow-up looks like.
+const CLASSIFIER_SYSTEM = [
+  'You route a coding assistant prompt to a model. Answer with exactly one word.',
+  'hard: planning, brainstorming, design or architecture; debugging, failing tests, crashes, root causes; changes across many files; long pasted logs, docs or code.',
+  'medium: ordinary code changes in one or two files, moderate how-to questions.',
+  'simple: short factual questions, lookups, explanations, chat.',
+  'keep: the prompt continues the current task (feedback, a reply to a question, a small tweak) and should stay on the current level.',
+  'Words: simple, medium, hard, keep.',
+].join('\n')
+
+const CLASSIFIER_TIMEOUT_MS = 3000
+
+const TIER_ORDER: Record<Tier, number> = { simple: 0, medium: 1, hard: 2 }
+
+const higher = (a: Tier, b: Tier): Tier => (TIER_ORDER[a] >= TIER_ORDER[b] ? a : b)
+
+// Haiku's own read of the prompt; undefined when it fails, times out or names no level.
+async function classify($: EngineInterface, text: string, sticky: Tier | null): Promise<Tier | 'keep' | undefined> {
+  const current = sticky === null ? 'Current level: none (first prompt, never answer keep).' : `Current level: ${sticky}.`
+  const result = await $.model
+    .complete({ model: 'haiku', system: CLASSIFIER_SYSTEM, prompt: `${current}\n\nPrompt:\n${text.slice(0, 4000)}`, maxTokens: 5, effort: 'low', timeoutMs: CLASSIFIER_TIMEOUT_MS })
+    .catch(() => undefined)
+  const word = result?.isAnswered ? result.text.trim().toLowerCase().match(/simple|medium|hard|keep/)?.[0] : undefined
+
+  return word === 'keep' ? (sticky === null ? undefined : 'keep') : TIERS.find(tier => tier === word)
+}
+
+// Instant answers first (a hard rule, a follow-up); otherwise Haiku and the rules both rank it and the higher wins.
+async function judge($: EngineInterface, text: string, sticky: Tier | null, command?: { command: string; args: string }): Promise<Verdict> {
+  const verdict = rankByRules(text, command)
+  const rules = verdict === undefined ? 'unsure' : `${verdict.tier}/${verdict.rule}`
+
+  if (verdict?.tier === 'hard') {
+    return { tier: 'hard', source: 'rule', reason: verdict.rule }
+  }
+
+  if (sticky !== null && isFollowUp(text)) {
+    return { tier: sticky, source: 'sticky', reason: 'follow-up' }
+  }
+
+  const haiku = await classify($, text, sticky)
+
+  if (haiku === 'keep' && sticky !== null) {
+    return { tier: sticky, source: 'classifier', reason: `rules: ${rules} · haiku: keep` }
+  }
+
+  if (haiku !== undefined && haiku !== 'keep') {
+    const tier = verdict === undefined ? haiku : higher(haiku, verdict.tier)
+
+    return { tier, source: 'classifier', reason: `rules: ${rules} · haiku: ${haiku} → ${tier}` }
+  }
+
+  // Haiku gave nothing: the rules alone, as before.
+  const decision = decideAgainstSticky(text, sticky, verdict)
+
+  if (decision.kind === 'switch') {
+    return { tier: decision.verdict.tier, source: 'rule', reason: `${decision.verdict.rule} (haiku failed)` }
+  }
+
+  if (sticky !== null) {
+    return { tier: sticky, source: 'sticky', reason: `rules: ${rules} (haiku failed)` }
+  }
+
+  throw new Error('no rule and no classifier answer')
+}
+
+async function decide($: EngineInterface, verdict: Verdict, text: string): Promise<void> {
+  const tokens = verdict.tier === 'simple' ? await contextTokens($) : undefined
+  const route = routeFor({ tier: verdict.tier, sessionModel: await $.session.model(), contextTokens: tokens })
+  const decision: Decision = { ...verdict, tier: route.tier, model: route.model, effort: route.effort, at: await $.clock.now(), contextTokens: tokens }
+
+  await update($, router, state => ({ ...state, stickyTier: route.tier, decision }))
+  await logDecision($, { ...decision, text })
+}
+
+function describe(state: RouterState): string {
+  const { decision } = state
+  const last = decision === null ? 'no decision yet' : `last: ${decision.model} (${decision.source}: ${decision.reason})`
+
+  return `Router ${state.isOn ? 'on' : 'off'} · sticky tier: ${state.stickyTier ?? 'none'} · ${last}`
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'router', description: 'Turn the model router on or off, or show its state' })
+    // Earlier versions set a status entry that outlives a reload; session-info draws the routed model now.
+    $.ui.status(undefined)
+
+    return next(e)
+  })
+
+  on('command.run', { command: 'router' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+
+    if (arg === 'on' || arg === 'off') {
+      await update($, router, state => ({ ...state, isOn: arg === 'on' }))
+    } else if (arg !== '' && arg !== 'status') {
+      return { text: 'Usage: /router on | off | status' }
+    }
+
+    return { text: describe(await read($, router)) }
+  })
+
+  // Haiku answers; it does not edit. An edit on a Haiku turn is refused and the turn moves up to Sonnet, which retries it.
+  on('tool.call', async ($, e, next) => {
+    const state = await read($, router)
+    const tool = String(e.tool)
+    const isEdit = EDIT_TOOLS.has(tool) || (e.tool === 'Bash' && WRITING_BASH.test(e.command))
+
+    if (e.agentId !== undefined || !state.isOn || !isEdit || stepModel === null || !/haiku/i.test(stepModel)) {
+      return next(e)
+    }
+
+    const verdict: Verdict = { tier: 'medium', source: 'escalated', reason: `haiku tried ${tool}` }
+    await decide($, verdict, tool === 'Bash' && e.tool === 'Bash' ? e.command : tool)
+
+    return { deny: 'Routed up to Sonnet for edits; retry this call.' }
+  }).catch(($, e, next) => next(e))
+
+  on('prompt.submit', async ($, e, next) => {
+    const state = await read($, router)
+
+    if (!state.isOn || !isRankable(e)) {
+      return next(e)
+    }
+
+    // A command's text is not rewritable, so its prefix is not read.
+    const prefix = e.command === undefined ? parsePrefix(e.text) : undefined
+
+    try {
+      if (prefix !== undefined) {
+        await decide($, { tier: prefix.tier, source: 'prefix', reason: 'prefix' }, e.text)
+
+        return next({ ...e, text: prefix.text })
+      }
+
+      const command = e.command === undefined ? undefined : { command: e.command.name, args: e.command.args }
+      await decide($, await judge($, e.text, state.stickyTier, command), e.text)
+    } catch {
+      // Rules or classifier failed: the sticky tier, or the session's model, carries the prompt.
+    }
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.step', async function* ($, e, next) {
+    const state = await read($, router)
+
+    if (e.agentId !== undefined) {
+      return yield* next(e)
+    }
+
+    if (!state.isOn || state.decision === null) {
+      stepModel = e.model
+
+      return yield* next(e)
+    }
+
+    const tokens = state.decision.tier === 'simple' ? await contextTokens($) : undefined
+    const route = routeFor({ tier: state.decision.tier, sessionModel: e.model, sessionEffort: e.effort, contextTokens: tokens })
+
+    if (route.model !== state.decision.model || route.effort !== state.decision.effort || route.tier !== state.decision.tier) {
+      await update($, router, current =>
+        current.decision === null ? current : { ...current, stickyTier: route.tier, decision: { ...current.decision, ...route } },
+      )
+    }
+
+    // One log line whenever the model a step runs on differs from the step before it.
+    if (stepModel !== route.model) {
+      await logDecision($, { ...state.decision, ...route, source: 'step', reason: `step ${e.index} of ${e.turnId}: ${stepModel ?? 'none'} -> ${route.model}`, text: '' })
+    }
+
+    stepModel = route.model
+
+    return yield* next({ ...e, model: route.model, effort: route.effort ?? e.effort })
+  })
+
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      await update($, router, state => ({ ...state, stickyTier: null, decision: null }))
+    }
+
+    return next(e)
+  })
+}
