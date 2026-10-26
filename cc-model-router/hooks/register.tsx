@@ -75,7 +75,6 @@ async function decide($: EngineInterface, verdict: Verdict, text: string): Promi
 
   await update($, router, state => ({ ...state, stickyTier: route.tier, decision }))
   await logDecision($, { ...decision, text })
-  $.ui.status(`router: ${route.model}`)
 }
 
 function describe(state: RouterState): string {
@@ -97,7 +96,6 @@ export const register: Register = on => {
 
     if (arg === 'on' || arg === 'off') {
       await update($, router, state => ({ ...state, isOn: arg === 'on' }))
-      $.ui.status(arg === 'on' ? undefined : 'router: off')
     } else if (arg !== '' && arg !== 'status') {
       return { text: 'Usage: /router on | off | status' }
     }
@@ -167,7 +165,6 @@ export const register: Register = on => {
       await update($, router, current =>
         current.decision === null ? current : { ...current, stickyTier: route.tier, decision: { ...current.decision, ...route } },
       )
-      $.ui.status(`router: ${route.model}`)
     }
 
     // One log line whenever the model a step runs on differs from the step before it.
@@ -183,7 +180,6 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
       await update($, router, state => ({ ...state, stickyTier: null, decision: null }))
-      $.ui.status(undefined)
     }
 
     return next(e)
