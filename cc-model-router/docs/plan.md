@@ -12,6 +12,29 @@
 
 **API reference:** `/private/tmp/claude-501/bundled-skills/2.1.302/eb5400bb4c022b6cbea14c7c7a737004/plugin-authoring/types/claude-code.d.ts` (grep by event name) and `reference.md` beside it. Once the mod has loaded once, the same types sit in `cc-model-router/.claude-plugin/types/`. Model the file layout on `session-info/`.
 
+## Status: built, and changed after review and use
+
+All seven tasks shipped (PR #5, merged). The tasks below are the plan as it was written. Where the build went another way, this list is the record. The code and `design.md` are current.
+
+**Changes made while building**
+- **Tests.** No tests were written or run. The owner keeps tests for Zango packages only. Each task was checked with `claude plugin validate`, and `tsc` ran before each push.
+- **Task 2: unknown context size.** It counts as small, so Haiku can be picked in a fresh session. The 160k limit applies to a known size only. (The first build treated unknown as too big, which kept every simple prompt off Haiku.)
+- **Task 3: follow-ups.** A hard verdict switches even after a follow-up word ("ok now debug the crash"). A follow-up only blocks moving down or sideways.
+- **Task 4: route recomputed on each step.** `turn.step` recomputes the route with the step's model, effort and context size, and updates the stored decision when it differs. Context size comes from `$.session.usage({ breakdown: 'summary' })`, a local estimate that counts tool results.
+- **Task 5: edit guard.** Uses deny-and-escalate, not re-sending the step, so Haiku replies still stream. Edits are judged by the model the step ran on (`stepModel`), not by the decision. The Bash write check ignores `2>&1` and `>/dev/null`.
+- **Task 6: session-info dependency.** session-info has no `dependencies` entry. It reads the router's state untyped, with a runtime check, so it loads without the router. The branch was rebased onto `session-info-bars-effort` (PR #4).
+
+**Changes the owner asked for after release**
+- **Step log.** A `step` line is logged whenever the model changes between two requests in one turn.
+- **Status line.** The router no longer sets `$.ui.status`. It clears any leftover entry at `session.start`. session-info draws `⑂ routed to <model>` above the branch name instead.
+- **Haiku classifier on every typed prompt.** It runs alongside the rules, replacing the tie-breaker in Task 4:
+  - A prefix, a hard rule, or a follow-up on a sticky model decides with no call.
+  - Otherwise `$.model.complete` on `haiku` (low effort, 5 tokens, 3-second timeout, a system prompt with the hard categories and the current level) answers `simple`, `medium`, `hard` or `keep`.
+  - `keep` keeps the sticky tier. Otherwise the higher of Haiku and the rules wins.
+  - If Haiku fails, the rules and the sticky logic decide alone.
+  - The log reason shows both answers. Each decision also logs `contextTokens`.
+- **README.** `cc-model-router/README.md` covers how it works and setup (PR #6).
+
 ## Global Constraints
 
 - Repo `/Users/ravi/claude-misc/claude-mods`, branch `cc-model-router`. Commit as `cybertron288 <ravi60353@gmail.com>`. No attribution trailer in commits or PR. Never push to `main`; push the branch and open a PR.
