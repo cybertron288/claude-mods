@@ -5,8 +5,26 @@ import type { Info, Meter } from '../types'
 
 const infoAtom = atom({ plugin: 'session-info', key: 'info' } as const, null)
 
-const windowLabel = (tokens: number): string =>
-  tokens >= 1_000_000 ? `${tokens / 1_000_000}M` : `${Math.round(tokens / 1000)}k`
+const FAMILIES = ['opus', 'sonnet', 'haiku', 'fable', 'mythos']
+
+// `claude-opus-5-5[1m]` reads as `Opus 5.5`, `claude-3-5-sonnet-20241022` as `Sonnet 3.5`, the alias `opus` as `Opus`.
+// Anything not recognised is shown as given.
+const modelName = (id: string): string => {
+  const raw = id.toLowerCase().replace(/\[1m\]|-1m\b/g, '').replace(/^claude-/, '').replace(/-?\d{8}$/, '')
+  const family = FAMILIES.find(name => raw.includes(name))
+
+  if (family === undefined) {
+    return id
+  }
+
+  const version = raw.replace(family, '').split('-').filter(part => /^\d+$/.test(part)).slice(0, 2).join('.')
+
+  return `${family[0]!.toUpperCase()}${family.slice(1)}${version === '' ? '' : ` ${version}`}`
+}
+
+// The model name for the line, with ` [1M]` after it when the model runs a 1M context window.
+const modelLabel = (id: string, window: number | null): string =>
+  `${modelName(id)}${/\[1m\]|-1m\b/i.test(id) || (window ?? 0) >= 1_000_000 ? ' [1M]' : ''}`
 
 // `five_hour` reads as `5h`, `seven_day` as `7d`; any other kind as its own name.
 const limitLabel = (kind: string): string => {
@@ -130,9 +148,8 @@ export const register: Register = on => {
 
     const { Box, Text } = $.ui.resolve(e)
     const parts = [
-      { text: info.model, color: COLORS.model },
+      { text: modelLabel(info.model, info.window), color: COLORS.model },
       info.effort === null ? null : { text: info.effort, color: COLORS.effort },
-      info.window === null ? null : { text: `${windowLabel(info.window)} ctx`, color: COLORS.window },
     ].filter((part): part is { text: string; color: string } => part !== null)
 
     return (
@@ -156,7 +173,7 @@ export const register: Register = on => {
             ))}
           </Box>
           <Box flexDirection="column" alignItems="flex-end">
-            {info.isRouted ? <Text color={COLORS.router}>{`⑂ routed to ${info.model}`}</Text> : null}
+            {info.isRouted ? <Text color={COLORS.router}>{`⑂ routed to ${modelLabel(info.model, info.window)}`}</Text> : null}
             {info.branch === null ? null : (
               <Text>
                 <Text color={COLORS.branch}>{`⎇ ${info.branch}`}</Text>
